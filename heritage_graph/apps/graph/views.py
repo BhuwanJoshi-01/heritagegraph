@@ -60,7 +60,7 @@ def _assertion_provenance_map() -> dict[tuple[str, str, str], dict]:
     qs = HeritageAssertion.objects.filter(
         asserted_property__startswith="relationship.",
         reconciliation_status="accepted",
-    ).select_related("source")
+    ).select_related("source", "content_type", "object_content_type")
     for a in qs.iterator():
         s = _resource_uri_from_ct(a.content_type, a.object_id)
         o = _resource_uri_from_ct(a.object_content_type, a.object_object_id)

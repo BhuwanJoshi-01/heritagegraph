@@ -548,7 +548,7 @@ class GuthiViewSet(ContributionFlowMixin, viewsets.ModelViewSet):
 
 
 class ArchitecturalStructureViewSet(ContributionFlowMixin, viewsets.ModelViewSet):
-    queryset = ArchitecturalStructure.objects.all()
+    queryset = ArchitecturalStructure.objects.select_related("has_current_location")
     serializer_class = ArchitecturalStructureSerializer
     search_fields = ["name", "location_name"]
 
@@ -751,10 +751,16 @@ class HeritageAssertionViewSet(viewsets.ModelViewSet):
         serializer.save(**extra)
 
     def get_queryset(self):
-        qs = super().get_queryset().select_related(
-            "source",
-            "entity_cluster",
-            "content_type",
+        qs = (
+            super()
+            .get_queryset()
+            .select_related(
+                "source",
+                "entity_cluster",
+                "content_type",
+                "object_content_type",
+            )
+            .prefetch_related("supporting_sources")
         )
         # Filter by entity type and ID
         entity_type = self.request.query_params.get("entity_type")

@@ -1,4 +1,5 @@
 from django.contrib.auth import get_user_model
+from django.db.models import QuerySet
 from rest_framework import serializers
 
 from .edtf_field import EDTFSerializerField
@@ -131,6 +132,51 @@ def _get_cultural_entity_id(instance):
     return None
 
 
+def _cultural_entity_ids_for(instances):
+    """
+    ``{pk: CulturalEntity UUID or None}`` for a page of CIDOC rows.
+
+    Same answer as ``_get_cultural_entity_id`` per row, in two queries per model
+    for the whole page: the FK link, then the revision back-link for rows that
+    predate it. Per row, the back-link was a scan of every revision's JSON.
+    """
+    from apps.heritage_data.models import CulturalEntity, Revision
+    from django.contrib.contenttypes.models import ContentType
+
+    by_model: dict = {}
+    for instance in instances:
+        if getattr(instance, "pk", None) is not None:
+            by_model.setdefault(instance.__class__, set()).add(instance.pk)
+
+    found: dict = {}
+    for model, pks in by_model.items():
+        ids: dict = {}
+        ct = ContentType.objects.get_for_model(model)
+        linked = (
+            CulturalEntity.objects.filter(
+                cidoc_content_type=ct, cidoc_object_id__in=pks
+            )
+            .order_by("-created_at")
+            .values_list("cidoc_object_id", "entity_id")
+        )
+        for object_id, entity_id in linked:
+            ids.setdefault(object_id, str(entity_id))
+        missing = pks - ids.keys()
+        if missing:
+            back_links = (
+                Revision.objects.filter(
+                    data___cidoc_model=model.__name__,
+                    data___cidoc_id__in=sorted(missing),
+                )
+                .order_by("pk")
+                .values_list("data", "entity_id")
+            )
+            for data, entity_id in back_links:
+                ids.setdefault(data.get("_cidoc_id"), str(entity_id))
+        found[model] = {pk: ids.get(pk) for pk in pks}
+    return found
+
+
 class CulturalEntityLinkMixin(serializers.Serializer):
     """Mixin to add cultural_entity_id to CIDOC serializers."""
 
@@ -140,7 +186,27 @@ class CulturalEntityLinkMixin(serializers.Serializer):
         cached = self.context.get("cultural_entity_id")
         if cached:
             return cached
+        page = self._page_cultural_entity_ids()
+        if page is not None:
+            ids = page.get(obj.__class__, {})
+            if obj.pk in ids:
+                return ids[obj.pk]
         return _get_cultural_entity_id(obj)
+
+    def _page_cultural_entity_ids(self):
+        """Look up the whole list page once, on its first row (lists only)."""
+        parent = self.parent
+        if not isinstance(parent, serializers.ListSerializer):
+            return None
+        if not isinstance(parent.instance, (list, tuple, QuerySet)):
+            return None
+        if not hasattr(self, "_cultural_entity_id_page"):
+            try:
+                page = _cultural_entity_ids_for(parent.instance)
+                self._cultural_entity_id_page = page
+            except Exception:
+                self._cultural_entity_id_page = None
+        return self._cultural_entity_id_page
 
 
 class BaseRegistrySerializer(serializers.ModelSerializer):
@@ -344,7 +410,8 @@ class ArchitecturalStructureSerializer(
             pass
         else:
             try:
-                loc = Location.objects.only("id", "name").get(pk=raw_loc)
+                # The viewset select_related()s it; one query per row otherwise.
+                loc = instance.has_current_location
                 data["has_current_location"] = {"id": loc.id, "name": loc.name}
             except Location.DoesNotExist:
                 data["has_current_location"] = {"id": raw_loc, "name": str(raw_loc)}
