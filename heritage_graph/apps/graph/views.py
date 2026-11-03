@@ -14,6 +14,7 @@ from apps.graph.kg_engine.lux_museum import (
 from apps.graph.kg_engine.museum_graph_enrichment import enrich_museum_graph_nodes
 from apps.graph.kg_engine.partitions import GraphPartition
 from rest_framework import permissions, status
+from rest_framework.exceptions import ValidationError
 from rest_framework.throttling import ScopedRateThrottle
 from rest_framework.response import Response
 from rest_framework.views import APIView
@@ -44,6 +45,18 @@ def _resource_uri_from_ct(content_type, pk) -> str | None:
         return None
     seg = registry_class_key_for_model(model) or model.__name__.lower()
     return f"{resource_base().rstrip('/')}/{str(seg).strip().lower()}/{pk}"
+
+
+def _int_param(request, name: str, *, default: int, maximum: int) -> int:
+    """Query-string integer clamped to 1..maximum; 400 when it is not an integer."""
+    raw = (request.query_params.get(name) or "").strip()
+    if not raw:
+        return default
+    try:
+        value = int(raw)
+    except ValueError:
+        raise ValidationError({name: "Must be an integer."})
+    return max(1, min(value, maximum))
 
 
 def _assertion_provenance_map() -> dict[tuple[str, str, str], dict]:
@@ -126,7 +139,7 @@ class KnowledgeGraphNeighborhoodView(APIView):
                 {"error": "`uri` is not a valid resource IRI."},
                 status=status.HTTP_400_BAD_REQUEST,
             )
-        limit = min(int(request.query_params.get("limit") or 50), 200)
+        limit = _int_param(request, "limit", default=50, maximum=200)
         include_lux = _parse_include_lux(request.query_params.get("include_lux"))
         rows = get_kg_engine().neighborhood(uri, limit=limit, include_lux=include_lux)
         return Response({"uri": uri, "edges": rows, "count": len(rows), "includeLux": include_lux})
@@ -142,6 +155,11 @@ class KnowledgeGraphQueryView(APIView):
     throttle_classes = [ScopedRateThrottle]
 
     def post(self, request, *args, **kwargs):
+        if not isinstance(request.data, dict):
+            return Response(
+                {"error": "Body must be a JSON object with a `query`."},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
         sparql = (request.data.get("query") or request.data.get("sparql") or "").strip()
         if not sparql:
             return Response(
@@ -179,8 +197,8 @@ class KnowledgeGraphGraphView(APIView):
     permission_classes = [permissions.AllowAny]
 
     def get(self, request, *args, **kwargs):
-        node_limit = min(int(request.query_params.get("node_limit") or 2000), 5000)
-        edge_limit = min(int(request.query_params.get("edge_limit") or 3000), 10000)
+        node_limit = _int_param(request, "node_limit", default=2000, maximum=5000)
+        edge_limit = _int_param(request, "edge_limit", default=3000, maximum=10000)
         # Default to the curated graph: a public/unauthenticated request only ever
         # sees reviewed data. scope=all (every typed entity, incl. draft/pending/
         # rejected) is a curator affordance and requires authentication, so

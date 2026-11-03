@@ -1,4 +1,5 @@
 import json
+import uuid
 
 from django.contrib.auth import get_user_model
 from django.contrib.auth.decorators import login_required
@@ -235,6 +236,14 @@ class ActivityLogViewSet(viewsets.ReadOnlyModelViewSet):
     permission_classes = [AllowAny]
 
 
+def _uuid_param(name: str, raw: str) -> uuid.UUID:
+    """A query-string UUID, or 400 (Django raises ValidationError -> 500 on filter)."""
+    try:
+        return uuid.UUID(raw)
+    except ValueError:
+        raise ValidationError({name: "Must be a UUID."})
+
+
 class CommentViewSet(viewsets.ModelViewSet):
     """
     Legacy flat comments API (submission/entity scoped).
@@ -332,7 +341,7 @@ class LogoutView(APIView):
                 provider=AuthEvent.PROVIDER_JWT,
             )
             return Response(status=status.HTTP_200_OK)
-        except (ObjectDoesNotExist, TokenError):
+        except (KeyError, ObjectDoesNotExist, TokenError):
             return Response(status=status.HTTP_400_BAD_REQUEST)
 
 
@@ -1626,7 +1635,7 @@ class RevisionViewSet(viewsets.ReadOnlyModelViewSet):
         qs = Revision.objects.select_related("created_by", "entity")
         entity_id = (self.request.query_params.get("entity") or "").strip()
         if entity_id:
-            qs = qs.filter(entity_id=entity_id)
+            qs = qs.filter(entity_id=_uuid_param("entity", entity_id))
         return qs
 
     @action(detail=True, methods=["get"])
@@ -1699,7 +1708,7 @@ class UserReviewDecisionsListView(generics.ListAPIView):
         if not reviewer:
             return ReviewDecision.objects.none()
         return (
-            ReviewDecision.objects.filter(reviewer_id=reviewer)
+            ReviewDecision.objects.filter(reviewer_id=_uuid_param("reviewer", reviewer))
             .select_related("entity")
             .order_by("-created_at")
         )
@@ -3588,6 +3597,7 @@ class ShareViewSet(viewsets.ViewSet):
                 {"error": "entity_id required"}, status=status.HTTP_400_BAD_REQUEST
             )
 
+        entity_id = _uuid_param("entity_id", entity_id.strip())
         total = Share.objects.filter(entity_id=entity_id).count()
         by_platform = {}
         for choice in Share.PLATFORM_CHOICES:

@@ -1,6 +1,7 @@
 import json
 import os
 import re
+import uuid
 
 from apps.heritage_data.permissions import IsExpertCurator, IsReviewerOrAdmin
 from django.conf import settings
@@ -758,8 +759,11 @@ class HeritageAssertionViewSet(viewsets.ModelViewSet):
         )
         # Filter by entity type and ID
         entity_type = self.request.query_params.get("entity_type")
-        entity_id = self.request.query_params.get("entity_id")
-        status = self.request.query_params.get("status")
+        entity_id = (self.request.query_params.get("entity_id") or "").strip()
+        # The UI sends reconciliation_status (instance-graph.ts); status is older.
+        status = self.request.query_params.get(
+            "status"
+        ) or self.request.query_params.get("reconciliation_status")
         cultural_entity_id = (
             self.request.query_params.get("cultural_entity_id") or ""
         ).strip()
@@ -774,7 +778,9 @@ class HeritageAssertionViewSet(viewsets.ModelViewSet):
                 pass
 
         if entity_id:
-            qs = qs.filter(object_id=entity_id)
+            if not entity_id.isdigit():
+                raise DRFValidationError({"entity_id": "Must be an integer."})
+            qs = qs.filter(object_id=int(entity_id))
 
         if cultural_entity_id:
             qs = qs.filter(
@@ -788,9 +794,10 @@ class HeritageAssertionViewSet(viewsets.ModelViewSet):
         if asserted_property:
             qs = qs.filter(asserted_property=asserted_property)
 
-        entity_cluster = self.request.query_params.get("entity_cluster")
+        entity_cluster = (self.request.query_params.get("entity_cluster") or "").strip()
         if entity_cluster:
-            qs = qs.filter(entity_cluster_id=entity_cluster)
+            cluster_id = _uuid_param("entity_cluster", entity_cluster)
+            qs = qs.filter(entity_cluster_id=cluster_id)
 
         ic = (self.request.query_params.get("identity_conflict") or "").lower()
         if ic in ("true", "1", "yes"):
@@ -801,6 +808,14 @@ class HeritageAssertionViewSet(viewsets.ModelViewSet):
                 qs = qs.filter(id__in=ids)
 
         return qs
+
+
+def _uuid_param(name: str, raw: str) -> uuid.UUID:
+    """A query-string UUID, or 400 (Django raises ValidationError -> 500 on filter)."""
+    try:
+        return uuid.UUID(raw)
+    except ValueError:
+        raise DRFValidationError({name: "Must be a UUID."})
 
 
 def _version_conflict_response(exc: DRFValidationError) -> Response | None:
