@@ -77,6 +77,25 @@ class StoreStats:
     source: str
 
 
+def _endpoint_candidates(endpoint: str, operation: str) -> list[str]:
+    """URLs to try for a SPARQL ``operation`` ("query" or "update"), in order.
+
+    The configured endpoint comes first when it already names that operation:
+    RDF_QUERY_URL=http://oxigraph:7878/query used to be tried as
+    .../query/query first, a 404 that doubled every read. Duplicates are
+    dropped, so a failed update is not sent to the same URL twice.
+    """
+    endpoint = endpoint.rstrip("/")
+    base = endpoint
+    for suffix in ("/query", "/update", "/sparql"):
+        if base.endswith(suffix):
+            base = base[: -len(suffix)]
+            break
+    own = endpoint if endpoint.endswith((f"/{operation}", "/sparql")) else None
+    ordered = (own, f"{base}/{operation}", endpoint, f"{base}/sparql")
+    return list(dict.fromkeys(url for url in ordered if url))
+
+
 class KnowledgeGraphStore:
     """Low-level triplestore operations."""
 
@@ -411,8 +430,7 @@ class KnowledgeGraphStore:
     ) -> list[dict[str, str]]:
         import requests
 
-        base = endpoint.replace("/update", "").replace("/sparql", "").rstrip("/")
-        for url in (f"{base}/query", endpoint, f"{base}/sparql"):
+        for url in _endpoint_candidates(endpoint, "query"):
             try:
                 resp = requests.get(
                     url,
@@ -423,6 +441,11 @@ class KnowledgeGraphStore:
                 resp.raise_for_status()
                 bindings = resp.json().get("results", {}).get("bindings", [])
                 return [{k: v.get("value", "") for k, v in row.items()} for row in bindings]
+            except requests.Timeout:
+                # A slow query, not a wrong URL: running it again elsewhere
+                # only adds another timeout_s.
+                logger.warning("SPARQL query timed out at %s", url)
+                return []
             except Exception:
                 continue
         return []
@@ -430,8 +453,7 @@ class KnowledgeGraphStore:
     def _remote_update(self, endpoint: str, sparql: str, *, timeout_s: int) -> bool:
         import requests
 
-        base = endpoint.replace("/update", "").replace("/sparql", "").rstrip("/")
-        for url in (endpoint, f"{base}/update", f"{base}/sparql"):
+        for url in _endpoint_candidates(endpoint, "update"):
             try:
                 resp = requests.post(
                     url,
@@ -441,6 +463,10 @@ class KnowledgeGraphStore:
                 )
                 resp.raise_for_status()
                 return True
+            except requests.Timeout as exc:
+                # The store may still apply it; re-sending only adds timeout_s.
+                logger.warning("SPARQL update failed at %s: %s", url, exc)
+                return False
             except Exception as exc:
                 logger.warning("SPARQL update failed at %s: %s", url, exc)
         return False
